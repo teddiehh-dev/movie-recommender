@@ -21,7 +21,6 @@ try:
     TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except (KeyError, FileNotFoundError):
-    # Fallback if secrets are not configured yet
     TMDB_API_KEY = 'YOUR_TMDB_API_KEY_HERE'
     GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE'
 
@@ -36,18 +35,9 @@ MAX_HISTORY_BATCHES = 20
 
 BASE_URL = "https://api.themoviedb.org/3"
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
-REQUIRED_COLUMNS = {"Name", "Rating", "Year"}
+REQUIRED_COLUMNS = {"Name", "Rating", "Year", "Date"}
 CHARACTER_PHOTOS_DIR = Path(__file__).parent / "character_photos"
 
-# Watchlist/history used to live in ONE shared file (watchlist.json, recommendation_history.json)
-# next to the script. That's fine for a single local user, but on a public deploy every visitor
-# was reading and writing the SAME file — everyone shared one watchlist. Each browser session now
-# gets its own file instead, keyed by a random id stored in st.session_state.
-#
-# Caveat for this proof-of-concept version: these are still plain files on the server's disk, not
-# a real database. On most free hosts (e.g. Streamlit Community Cloud) that disk is wiped on every
-# redeploy/restart, so treat this as "isolated per visitor for the current session," not "permanent
-# storage." A real deployment would swap this for a hosted database keyed by a login, not a session id.
 USER_DATA_DIR = Path(__file__).parent / "user_data"
 USER_DATA_DIR.mkdir(exist_ok=True)
 
@@ -389,6 +379,7 @@ async def fetch_movie_details_by_id_async(client, movie_id, sem=None, retries=2)
                     "vote_count": details.get("vote_count"),
                     "trailer_url": extract_trailer_url(details.get("videos", {}).get("results", [])),
                     "watch_providers": details.get("watch/providers", {}).get("results", {}),
+                    "origin_country": details.get("origin_country", []), # NEW - used for fun facts
                 }
             except httpx.HTTPError:
                 if attempt == retries:
@@ -844,6 +835,21 @@ st.write(
     "the genres, directors, and actors you love most."
 )
 
+with st.expander("ℹ️ About & Instructions: How to get your Letterboxd Data", expanded=False):
+    st.markdown("""
+    **How does this app work?**
+    This application analyzes your entire Letterboxd watching history using the TMDB API. It calculates your lifetime stats (Fun Facts) and then feeds your highest and lowest rated movies to Google's Gemini AI to build a "Taste Profile" consisting of your favorite actors, directors, and genres. It then uses this profile to generate personalized movie recommendations.
+
+    **How to get your `ratings.csv` file from Letterboxd:**
+    1. Log into your [Letterboxd](https://letterboxd.com) account on a desktop or mobile browser.
+    2. Click your username in the top navigation bar and select **Settings**.
+    3. Click on the **Import & Export** tab.
+    4. Click the **Export your data** button. 
+    5. This will download a `.zip` file to your computer. Unzip it.
+    6. Inside that folder, you will find a file named **`ratings.csv`**. 
+    7. Upload that exact file into the uploader below!
+    """)
+
 st.sidebar.header("🔧 Settings")
 rating_threshold = st.sidebar.slider(
     "Treat movies rated at or above this as 'liked':",
@@ -864,8 +870,6 @@ st.sidebar.caption(f"Temperature fixed at {FIXED_TEMPERATURE}. TMDB concurrency 
 st.sidebar.caption("Your watchlist and history are private to this session and aren't saved permanently.")
 
 # ---- session state init ----
-# session_id MUST be set before load_watchlist()/load_history() run, since those
-# now read a file keyed on this id (see USER_DATA_DIR note above).
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "watchlist" not in st.session_state:
@@ -878,6 +882,8 @@ if "taste_profile" not in st.session_state:
     st.session_state.taste_profile = None
 if "fun_facts" not in st.session_state:
     st.session_state.fun_facts = None
+if "monthly_watch_data" not in st.session_state:
+    st.session_state.monthly_watch_data = None
 if "character_match" not in st.session_state:
     st.session_state.character_match = None
 if "tmdb_cache" not in st.session_state:
@@ -963,6 +969,17 @@ def render_recommendations_tab():
                 )
                 st.stop()
             
+            # Prepare Line Graph Data
+            try:
+                df['Date'] = pd.to_datetime(df['Date'])
+                df['Month_Year'] = df['Date'].dt.to_period('M')
+                monthly_counts = df.groupby('Month_Year').size().reset_index(name='Movies Watched')
+                monthly_counts['Month_Year'] = monthly_counts['Month_Year'].dt.to_timestamp()
+                st.session_state.monthly_watch_data = monthly_counts
+            except Exception as e:
+                 st.caption(f"Could not parse 'Date' column for line graph: {e}")
+                 st.session_state.monthly_watch_data = None
+
             seen_movies = df["Name"].dropna().tolist()
             st.session_state.seen_movies = seen_movies
             liked_movies = df[df["Rating"] >= rating_threshold].copy()
@@ -1011,6 +1028,7 @@ def render_recommendations_tab():
                                 "Year": yr_parsed,
                                 "Directors": data.get("directors", []),
                                 "Actors": data.get("actors", []),
+                                "Countries": data.get("origin_country", [])
                             })
 
                     # --- CALCULATE FUN FACTS ---
@@ -1020,11 +1038,16 @@ def render_recommendations_tab():
                     ff["total_movies"] = len(analyzed_full_data)
                     all_actors = Counter()
                     all_directors = Counter()
+                    all_countries = Counter()
+                    
                     for d in analyzed_full_data:
                         for a in d["Actors"]: all_actors[a] += 1
                         for dr in d["Directors"]: all_directors[dr] += 1
+                        for c in d["Countries"]: all_countries[c] += 1
+                        
                     ff["most_watched_actor"] = all_actors.most_common(1)[0] if all_actors else None
                     ff["most_watched_director"] = all_directors.most_common(1)[0] if all_directors else None
+                    ff["top_countries"] = all_countries.most_common(3) if all_countries else None
                     
                     movie_counts = df["Name"].value_counts()
                     ff["most_logged_movie"] = (movie_counts.index[0], movie_counts.iloc[0]) if not df.empty else None
@@ -1033,12 +1056,11 @@ def render_recommendations_tab():
                     valid_ratings = [d for d in analyzed_full_data if d["User_Rating"] is not None and d["TMDB_Rating"] is not None]
                     if valid_ratings:
                         for d in valid_ratings:
-                            # TMDB is 1-10, User is 0.5-5.0. Scale user up.
                             d["Diff"] = (d["User_Rating"] * 2) - d["TMDB_Rating"]
                         
                         valid_ratings.sort(key=lambda x: x["Diff"])
-                        ff["biggest_hot_take"] = valid_ratings[0]  # User rated low, TMDB loved it
-                        ff["biggest_hidden_gem"] = valid_ratings[-1] # User loved it, TMDB hated it
+                        ff["biggest_hot_take"] = valid_ratings[0]  
+                        ff["biggest_hidden_gem"] = valid_ratings[-1] 
                         
                         user_ratings_only = [d["User_Rating"] for d in valid_ratings]
                         ff["mean_rating"] = sum(user_ratings_only) / len(user_ratings_only)
@@ -1265,6 +1287,11 @@ def render_recommendations_tab():
         st.write("---")
         st.subheader(f"🏆 Your Ultimate Fun Facts ({ff.get('total_movies', 0)} Logged Films)")
         
+        # Insert Line Chart if Data Available
+        if st.session_state.monthly_watch_data is not None:
+             st.markdown("### 📈 Monthly Viewing History")
+             st.line_chart(st.session_state.monthly_watch_data, x="Month_Year", y="Movies Watched")
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -1312,8 +1339,11 @@ def render_recommendations_tab():
                     st.write(f"**Most Watched Actor:** {ff['most_watched_actor'][0]} ({ff['most_watched_actor'][1]} films)")
                 if ff.get("most_watched_director"):
                     st.write(f"**Most Watched Director:** {ff['most_watched_director'][0]} ({ff['most_watched_director'][1]} films)")
-                if ff.get("most_logged_movie") and ff["most_logged_movie"][1] > 1:
-                    st.write(f"**Most Logged Film:** *{ff['most_logged_movie'][0]}* ({ff['most_logged_movie'][1]} plays)")
+                
+                # Insert Top Countries Break Down
+                if ff.get("top_countries"):
+                    country_strings = [f"{c[0]} ({c[1]})" for c in ff["top_countries"]]
+                    st.write(f"**Most Watched Regions:** {', '.join(country_strings)}")
 
     if st.session_state.taste_profile:
         tp = st.session_state.taste_profile
