@@ -35,7 +35,7 @@ MAX_HISTORY_BATCHES = 20
 
 BASE_URL = "https://api.themoviedb.org/3"
 POSTER_BASE = "https://image.tmdb.org/t/p/w342"
-REQUIRED_COLUMNS = {"Name", "Rating", "Year", "Date"}
+REQUIRED_COLUMNS = {"Name", "Rating", "Year", "Watched Date"}
 CHARACTER_PHOTOS_DIR = Path(__file__).parent / "character_photos"
 
 USER_DATA_DIR = Path(__file__).parent / "user_data"
@@ -982,13 +982,13 @@ def render_recommendations_tab():
 
             # Prepare Line Graph Data
             try:
-                df['Date'] = pd.to_datetime(df['Date'])
-                df['Month_Year'] = df['Date'].dt.to_period('M')
+                df['Watched Date'] = pd.to_datetime(df['Watched Date'])
+                df['Month_Year'] = df['Watched Date'].dt.to_period('M')
                 monthly_counts = df.groupby('Month_Year').size().reset_index(name='Movies Watched')
                 monthly_counts['Month_Year'] = monthly_counts['Month_Year'].dt.to_timestamp()
                 st.session_state.monthly_watch_data = monthly_counts
             except Exception as e:
-                 st.caption(f"Could not parse 'Date' column for line graph: {e}")
+                 st.caption(f"Could not parse 'Watched Date' column for line graph: {e}")
                  st.session_state.monthly_watch_data = None
 
             seen_movies = df["Name"].dropna().tolist()
