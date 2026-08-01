@@ -840,13 +840,13 @@ with st.expander("ℹ️ About & Instructions: How to get your Letterboxd Data",
     **How does this app work?**
     This application analyzes your entire Letterboxd watching history using the TMDB API. It calculates your lifetime stats (Fun Facts) and then feeds your highest and lowest rated movies to Google's Gemini AI to build a "Taste Profile" consisting of your favorite actors, directors, and genres. It then uses this profile to generate personalized movie recommendations.
 
-    **How to get your `ratings.csv` file from Letterboxd:**
+    **How to get your `diary.csv` file from Letterboxd:**
     1. Log into your [Letterboxd](https://letterboxd.com) account on a desktop or mobile browser.
     2. Click your username in the top navigation bar and select **Settings**.
     3. Click on the **Import & Export** tab.
     4. Click the **Export your data** button. 
     5. This will download a `.zip` file to your computer. Unzip it.
-    6. Inside that folder, you will find a file named **`ratings.csv`**. 
+    6. Inside that folder, you will find a file named **`diary.csv`**. 
     7. Upload that exact file into the uploader below!
     """)
 
@@ -946,7 +946,7 @@ def render_recommendations_tab():
 
     st.write("---")
 
-    uploaded_file = st.file_uploader("Upload your Letterboxd 'ratings.csv' file", type=["csv"])
+    uploaded_file = st.file_uploader("Upload your Letterboxd 'diary.csv' file", type=["csv"])
 
     # ==========================================
     # MAIN EXECUTION PIPELINE
@@ -964,11 +964,22 @@ def render_recommendations_tab():
             missing_cols = REQUIRED_COLUMNS - set(df.columns)
             if missing_cols:
                 st.error(
-                    f"This doesn't look like a Letterboxd `ratings.csv` — missing column(s): "
+                    f"This doesn't look like a Letterboxd `diary.csv` — missing column(s): "
                     f"{', '.join(sorted(missing_cols))}."
                 )
                 st.stop()
             
+            # --- NEW DIARY.CSV CLEANING LOGIC ---
+            
+            # 1. Drop any diary entries where you didn't leave a star rating
+            df = df.dropna(subset=["Rating"])
+            
+            # 2. Drop duplicate movie entries (rewatches) so they don't skew the AI profile.
+            # keep="last" ensures it keeps your most recent rating for that film.
+            df = df.drop_duplicates(subset=["Name", "Year"], keep="last")
+            
+            # ------------------------------------
+
             # Prepare Line Graph Data
             try:
                 df['Date'] = pd.to_datetime(df['Date'])
